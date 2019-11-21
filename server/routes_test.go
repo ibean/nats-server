@@ -349,6 +349,7 @@ func TestSeedSolicitWorks(t *testing.T) {
 	defer nc2.Close()
 
 	checkClusterFormed(t, srvSeed, srvA, srvB)
+	checkExpectedSubs(t, 1, srvB)
 
 	nc2.Publish("foo", []byte("Hello"))
 
@@ -404,6 +405,7 @@ func TestTLSSeedSolicitWorks(t *testing.T) {
 	defer nc2.Close()
 
 	checkClusterFormed(t, srvSeed, srvA, srvB)
+	checkExpectedSubs(t, 1, srvB)
 
 	nc2.Publish("foo", []byte("Hello"))
 
@@ -461,6 +463,7 @@ func TestChainedSolicitWorks(t *testing.T) {
 	defer nc2.Close()
 
 	checkClusterFormed(t, srvSeed, srvA, srvB)
+	checkExpectedSubs(t, 1, srvB)
 
 	nc2.Publish("foo", []byte("Hello"))
 
@@ -1077,4 +1080,95 @@ func TestRouteNoCrashOnAddingSubToRoute(t *testing.T) {
 	natsPub(t, pubNC, "foo", []byte("hello world!"))
 
 	waitCh(t, ch, "Did not get all messages")
+}
+
+func TestRouteRTT(t *testing.T) {
+	ob := DefaultOptions()
+	ob.PingInterval = 15 * time.Millisecond
+	sb := RunServer(ob)
+	defer sb.Shutdown()
+
+	oa := DefaultOptions()
+	oa.PingInterval = 15 * time.Millisecond
+	oa.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", ob.Cluster.Host, ob.Cluster.Port))
+	sa := RunServer(oa)
+	defer sa.Shutdown()
+
+	checkClusterFormed(t, sa, sb)
+
+	checkRTT := func(t *testing.T, s *Server) time.Duration {
+		t.Helper()
+		var route *client
+		s.mu.Lock()
+		for _, r := range s.routes {
+			route = r
+			break
+		}
+		s.mu.Unlock()
+
+		var rtt time.Duration
+		checkFor(t, 2*firstPingInterval, 15*time.Millisecond, func() error {
+			route.mu.Lock()
+			rtt = route.rtt
+			route.mu.Unlock()
+			if rtt == 0 {
+				return fmt.Errorf("RTT not tracked")
+			}
+			return nil
+		})
+		return rtt
+	}
+
+	prevA := checkRTT(t, sa)
+	prevB := checkRTT(t, sb)
+
+	checkUpdated := func(t *testing.T, s *Server, prev time.Duration) {
+		t.Helper()
+		attempts := 0
+		timeout := time.Now().Add(2 * firstPingInterval)
+		for time.Now().Before(timeout) {
+			if rtt := checkRTT(t, s); rtt != 0 {
+				return
+			}
+			attempts++
+			if attempts == 5 {
+				// If could be that we are very unlucky
+				// and the RTT is constant. So override
+				// the route's RTT to 0 to see if it gets
+				// updated.
+				s.mu.Lock()
+				for _, r := range s.routes {
+					r.mu.Lock()
+					r.rtt = 0
+					r.mu.Unlock()
+					break
+				}
+				s.mu.Unlock()
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		t.Fatalf("RTT probably not updated")
+	}
+	checkUpdated(t, sa, prevA)
+	checkUpdated(t, sb, prevB)
+
+	sa.Shutdown()
+	sb.Shutdown()
+
+	// Now check that initial RTT is computed prior to first PingInterval
+	// Get new options to avoid possible race changing the ping interval.
+	ob = DefaultOptions()
+	ob.PingInterval = time.Minute
+	sb = RunServer(ob)
+	defer sb.Shutdown()
+
+	oa = DefaultOptions()
+	oa.PingInterval = time.Minute
+	oa.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", ob.Cluster.Host, ob.Cluster.Port))
+	sa = RunServer(oa)
+	defer sa.Shutdown()
+
+	checkClusterFormed(t, sa, sb)
+	checkRTT(t, sa)
+	checkRTT(t, sb)
 }

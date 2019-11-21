@@ -18,10 +18,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
 
@@ -446,8 +449,8 @@ func TestAccountParseConfigImportsExports(t *testing.T) {
 	if ea == nil {
 		t.Fatalf("Expected to get a non-nil exportAuth for service")
 	}
-	if ea.respType != Singelton {
-		t.Fatalf("Expected to get a Singelton response type, got %q", ea.respType)
+	if ea.respType != Singleton {
+		t.Fatalf("Expected to get a Singleton response type, got %q", ea.respType)
 	}
 
 	if synAcc == nil {
@@ -692,6 +695,57 @@ func TestSimpleMapping(t *testing.T) {
 	}
 	if fslc := fooAcc.sl.Count(); fslc != 0 {
 		t.Fatalf("Expected no shadowed subscriptions on fooAcc, got %d", fslc)
+	}
+}
+
+// https://github.com/nats-io/nats-server/issues/1159
+func TestStreamImportLengthBug(t *testing.T) {
+	s, fooAcc, barAcc := simpleAccountServer(t)
+	defer s.Shutdown()
+
+	cfoo, _, _ := newClientForServer(s)
+	defer cfoo.nc.Close()
+
+	if err := cfoo.registerWithAccount(fooAcc); err != nil {
+		t.Fatalf("Error registering client with 'foo' account: %v", err)
+	}
+	cbar, _, _ := newClientForServer(s)
+	defer cbar.nc.Close()
+
+	if err := cbar.registerWithAccount(barAcc); err != nil {
+		t.Fatalf("Error registering client with 'bar' account: %v", err)
+	}
+
+	if err := cfoo.acc.AddStreamExport("client.>", nil); err != nil {
+		t.Fatalf("Error adding account export to client foo: %v", err)
+	}
+	if err := cbar.acc.AddStreamImport(fooAcc, "client.>", "events.>"); err == nil {
+		t.Fatalf("Expected an error when using a stream import prefix with a wildcard")
+	}
+
+	if err := cbar.acc.AddStreamImport(fooAcc, "client.>", "events"); err != nil {
+		t.Fatalf("Error adding account import to client bar: %v", err)
+	}
+
+	if err := cbar.parse([]byte("SUB events.> 1\r\n")); err != nil {
+		t.Fatalf("Error for client 'bar' from server: %v", err)
+	}
+
+	// Also make sure that we will get an error from a config version.
+	// JWT will be updated separately.
+	cf := createConfFile(t, []byte(`
+	accounts {
+	  foo {
+	    exports = [{stream: "client.>"}]
+	  }
+	  bar {
+	    imports = [{stream: {account: "foo", subject:"client.>"}, prefix:"events.>"}]
+	  }
+	}
+	`))
+	defer os.Remove(cf)
+	if _, err := ProcessConfigFile(cf); err == nil {
+		t.Fatalf("Expected an error with import with wildcard prefix")
 	}
 }
 
@@ -1070,7 +1124,7 @@ func TestServiceExportWithWildcards(t *testing.T) {
 				t.Fatalf("Error registering client with 'bar' account: %v", err)
 			}
 
-			// Now setup the resonder under cfoo
+			// Now setup the responder under cfoo
 			cfoo.parse([]byte("SUB ngs.update.* 1\r\n"))
 
 			// Now send the request. Remember we expect the request on our local ngs.update.
@@ -1181,6 +1235,7 @@ func TestCrossAccountRequestReply(t *testing.T) {
 	if err := cfoo.registerWithAccount(fooAcc); err != nil {
 		t.Fatalf("Error registering client with 'foo' account: %v", err)
 	}
+
 	cbar, crBar, _ := newClientForServer(s)
 	defer cbar.nc.Close()
 
@@ -1267,6 +1322,290 @@ func TestCrossAccountRequestReply(t *testing.T) {
 	// for the response but should be removed when the response was processed.
 	if nr := fooAcc.numServiceRoutes(); nr != 0 {
 		t.Fatalf("Expected no remaining routes on fooAcc, got %d", nr)
+	}
+}
+
+func TestAccountRequestReplyTrackLatency(t *testing.T) {
+	s, fooAcc, barAcc := simpleAccountServer(t)
+	defer s.Shutdown()
+
+	// Run server in Go routine. We need this one running for internal sending of msgs.
+	go s.Start()
+	// Wait for accept loop(s) to be started
+	if !s.ReadyForConnections(10 * time.Second) {
+		panic("Unable to start NATS Server in Go Routine")
+	}
+
+	cfoo, crFoo, _ := newClientForServer(s)
+	defer cfoo.nc.Close()
+
+	if err := cfoo.registerWithAccount(fooAcc); err != nil {
+		t.Fatalf("Error registering client with 'foo' account: %v", err)
+	}
+
+	cbar, crBar, _ := newClientForServer(s)
+	defer cbar.nc.Close()
+
+	if err := cbar.registerWithAccount(barAcc); err != nil {
+		t.Fatalf("Error registering client with 'bar' account: %v", err)
+	}
+
+	// Add in the service export for the requests. Make it public.
+	if err := fooAcc.AddServiceExport("track.service", nil); err != nil {
+		t.Fatalf("Error adding account service export to client foo: %v", err)
+	}
+
+	// Now let's add in tracking
+
+	// This looks ok but should fail because we have not set a system account needed for internal msgs.
+	if err := fooAcc.TrackServiceExport("track.service", "results"); err != ErrNoSysAccount {
+		t.Fatalf("Expected error enabling tracking latency without a system account")
+	}
+
+	if err := s.SetSystemAccount(globalAccountName); err != nil {
+		t.Fatalf("Error setting system account: %v", err)
+	}
+
+	// First check we get an error if service does not exist.
+	if err := fooAcc.TrackServiceExport("track.wrong", "results"); err != ErrMissingService {
+		t.Fatalf("Expected error enabling tracking latency for wrong service")
+	}
+	// Check results should be a valid subject
+	if err := fooAcc.TrackServiceExport("track.service", "results.*"); err != ErrBadPublishSubject {
+		t.Fatalf("Expected error enabling tracking latency for bad results subject")
+	}
+	// Make sure we can not loop around on ourselves..
+	if err := fooAcc.TrackServiceExport("track.service", "track.service"); err != ErrBadPublishSubject {
+		t.Fatalf("Expected error enabling tracking latency for same subject")
+	}
+	// Check bad sampling
+	if err := fooAcc.TrackServiceExportWithSampling("track.service", "results", -1); err != ErrBadSampling {
+		t.Fatalf("Expected error enabling tracking latency for bad sampling")
+	}
+	if err := fooAcc.TrackServiceExportWithSampling("track.service", "results", 101); err != ErrBadSampling {
+		t.Fatalf("Expected error enabling tracking latency for bad sampling")
+	}
+
+	// Now let's add in tracking for real. This will be 100%
+	if err := fooAcc.TrackServiceExport("track.service", "results"); err != nil {
+		t.Fatalf("Error enabling tracking latency: %v", err)
+	}
+
+	// Now add in the route mapping for request to be routed to the foo account.
+	if err := barAcc.AddServiceImport(fooAcc, "req", "track.service"); err != nil {
+		t.Fatalf("Error adding account service import to client bar: %v", err)
+	}
+
+	// Now setup the responder under cfoo and the listener for the results
+	cfoo.parse([]byte("SUB track.service 1\r\nSUB results 2\r\n"))
+
+	readFooMsg := func() ([]byte, string) {
+		t.Helper()
+		l, err := crFoo.ReadString('\n')
+		if err != nil {
+			t.Fatalf("Error reading from client 'bar': %v", err)
+		}
+		mraw := msgPat.FindAllStringSubmatch(l, -1)
+		if len(mraw) == 0 {
+			t.Fatalf("No message received")
+		}
+		msg := mraw[0]
+		msgSize, _ := strconv.Atoi(msg[LEN_INDEX])
+		return grabPayload(crFoo, msgSize), msg[REPLY_INDEX]
+	}
+
+	start := time.Now()
+
+	// Now send the request. Remember we expect the request on our local foo. We added the route
+	// with that "from" and will map it to "test.request"
+	go cbar.parseAndFlush([]byte("SUB resp 11\r\nPUB req resp 4\r\nhelp\r\n"))
+
+	// Now read the request from crFoo
+	_, reply := readFooMsg()
+	replyOp := fmt.Sprintf("PUB %s 2\r\n22\r\n", reply)
+
+	serviceTime := 25 * time.Millisecond
+
+	// We will wait a bit to check latency results
+	go func() {
+		time.Sleep(serviceTime)
+		cfoo.parseAndFlush([]byte(replyOp))
+	}()
+
+	// Now read the response from crBar
+	_, err := crBar.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Error reading from client 'bar': %v", err)
+	}
+
+	// Now let's check that we got the sampling results
+	rMsg, _ := readFooMsg()
+
+	// Unmarshal and check it.
+	var sl ServiceLatency
+	err = json.Unmarshal(rMsg, &sl)
+	if err != nil {
+		t.Fatalf("Could not parse latency json: %v\n", err)
+	}
+	startDelta := sl.RequestStart.Sub(start)
+	if startDelta > 5*time.Millisecond {
+		t.Fatalf("Bad start delta %v", startDelta)
+	}
+	if sl.ServiceLatency < serviceTime {
+		t.Fatalf("Bad service latency: %v", sl.ServiceLatency)
+	}
+	if sl.TotalLatency < sl.ServiceLatency {
+		t.Fatalf("Bad total latency: %v", sl.ServiceLatency)
+	}
+}
+
+func genAsyncFlushParser(c *client) (func(string), chan bool) {
+	pab := make(chan []byte, 16)
+	pas := func(cs string) { pab <- []byte(cs) }
+	quit := make(chan bool)
+	go func() {
+		for {
+			select {
+			case cs := <-pab:
+				c.parseAndFlush(cs)
+			case <-quit:
+				return
+			}
+		}
+	}()
+	return pas, quit
+}
+
+// This will test for leaks in the remote latency tracking via client.rrTracking
+func TestAccountTrackLatencyRemoteLeaks(t *testing.T) {
+	optsA, _ := ProcessConfigFile("./configs/seed.conf")
+	optsA.NoSigs, optsA.NoLog = true, true
+	srvA := RunServer(optsA)
+	defer srvA.Shutdown()
+	optsB := nextServerOpts(optsA)
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", optsA.Cluster.Host, optsA.Cluster.Port))
+	srvB := RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+	srvs := []*Server{srvA, srvB}
+
+	// Now add in the accounts and setup tracking.
+	for _, s := range srvs {
+		s.SetSystemAccount(globalAccountName)
+		fooAcc, _ := s.RegisterAccount("$foo")
+		fooAcc.AddServiceExport("track.service", nil)
+		fooAcc.TrackServiceExport("track.service", "results")
+		barAcc, _ := s.RegisterAccount("$bar")
+		if err := barAcc.AddServiceImport(fooAcc, "req", "track.service"); err != nil {
+			t.Fatalf("Failed to import: %v", err)
+		}
+	}
+
+	// Test with a responder on second server, srvB. but they will not respond.
+	cfoo, crFoo, _ := newClientForServer(srvB)
+	defer cfoo.nc.Close()
+	fooAcc, _ := srvB.LookupAccount("$foo")
+	if err := cfoo.registerWithAccount(fooAcc); err != nil {
+		t.Fatalf("Error registering client with 'foo' account: %v", err)
+	}
+
+	// Set new limits
+	fooAcc.SetAutoExpireTTL(time.Millisecond)
+	fooAcc.SetMaxAutoExpireResponseMaps(5)
+
+	// Now setup the resonder under cfoo and the listener for the results
+	time.Sleep(50 * time.Millisecond)
+	baseSubs := int(srvA.NumSubscriptions())
+	cfoo.parse([]byte("SUB track.service 1\r\n"))
+	// Wait for it to propagate.
+	checkExpectedSubs(t, baseSubs+1, srvA)
+
+	cbar, _, _ := newClientForServer(srvA)
+	defer cbar.nc.Close()
+	barAcc, _ := srvA.LookupAccount("$bar")
+	if err := cbar.registerWithAccount(barAcc); err != nil {
+		t.Fatalf("Error registering client with 'bar' account: %v", err)
+	}
+
+	parseAsync, quit := genAsyncFlushParser(cbar)
+	defer func() { quit <- true }()
+
+	readFooMsg := func() ([]byte, string) {
+		t.Helper()
+		l, err := crFoo.ReadString('\n')
+		if err != nil {
+			t.Fatalf("Error reading from client 'bar': %v", err)
+		}
+		mraw := msgPat.FindAllStringSubmatch(l, -1)
+		if len(mraw) == 0 {
+			t.Fatalf("No message received")
+		}
+		msg := mraw[0]
+		msgSize, _ := strconv.Atoi(msg[LEN_INDEX])
+		return grabPayload(crFoo, msgSize), msg[REPLY_INDEX]
+	}
+
+	// Send 2 requests
+	parseAsync("SUB resp 11\r\nPUB req resp 4\r\nhelp\r\nPUB req resp 4\r\nhelp\r\n")
+
+	readFooMsg()
+	readFooMsg()
+
+	var rc *client
+	// Pull out first client
+	srvB.mu.Lock()
+	for _, rc = range srvB.clients {
+		if rc != nil {
+			break
+		}
+	}
+	srvB.mu.Unlock()
+
+	tracking := func() int {
+		rc.mu.Lock()
+		numTracking := len(rc.rrTracking)
+		rc.mu.Unlock()
+		return numTracking
+	}
+
+	numTracking := tracking()
+
+	if numTracking != 2 {
+		t.Fatalf("Expected to have 2 tracking replies, got %d", numTracking)
+	}
+
+	// Make sure these remote tracking replies honor the current auto expire TTL.
+	time.Sleep(2 * time.Millisecond)
+
+	rc.mu.Lock()
+	rc.pruneRemoteTracking()
+	numTracking = len(rc.rrTracking)
+	rc.mu.Unlock()
+
+	if numTracking != 0 {
+		t.Fatalf("Expected to have no more tracking replies, got %d", numTracking)
+	}
+
+	// Test that we trigger on max.
+	for i := 0; i < 4; i++ {
+		parseAsync("PUB req resp 4\r\nhelp\r\n")
+		readFooMsg()
+	}
+
+	if numTracking = tracking(); numTracking != 4 {
+		t.Fatalf("Expected to have 4 tracking replies, got %d", numTracking)
+	}
+
+	// Make sure they will be expired.
+	time.Sleep(2 * time.Millisecond)
+
+	// Should trigger here
+	parseAsync("PUB req resp 4\r\nhelp\r\n")
+	readFooMsg()
+
+	if numTracking = tracking(); numTracking != 1 {
+		t.Fatalf("Expected to have 1 tracking reply, got %d", numTracking)
 	}
 }
 
@@ -1496,20 +1835,30 @@ func TestCrossAccountServiceResponseLeaks(t *testing.T) {
 
 	// Now send some requests..We will not respond.
 	var sb strings.Builder
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 50; i++ {
 		sb.WriteString(fmt.Sprintf("PUB foo REPLY.%d 4\r\nhelp\r\n", i))
 	}
 	go cbar.parseAndFlush([]byte(sb.String()))
 
 	// Make sure requests are processed.
-	_, err := crFoo.ReadString('\n')
-	if err != nil {
+	if _, err := crFoo.ReadString('\n'); err != nil {
 		t.Fatalf("Error reading from client 'bar': %v", err)
 	}
 
 	// We should have leaked response maps.
-	if nr := fooAcc.numServiceRoutes(); nr != 100 {
+	if nr := fooAcc.numServiceRoutes(); nr != 50 {
 		t.Fatalf("Expected response maps to be present, got %d", nr)
+	}
+
+	sb.Reset()
+	for i := 50; i < 100; i++ {
+		sb.WriteString(fmt.Sprintf("PUB foo REPLY.%d 4\r\nhelp\r\n", i))
+	}
+	go cbar.parseAndFlush([]byte(sb.String()))
+
+	// Make sure requests are processed.
+	if _, err := crFoo.ReadString('\n'); err != nil {
+		t.Fatalf("Error reading from client 'bar': %v", err)
 	}
 
 	// They should be gone here eventually.
@@ -1758,12 +2107,71 @@ func TestAccountCheckStreamImportsEqual(t *testing.T) {
 	}
 }
 
+func TestAccountNoDeadlockOnQueueSubRouteMapUpdate(t *testing.T) {
+	opts := DefaultOptions()
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	nc.QueueSubscribeSync("foo", "bar")
+
+	var accs []*Account
+	for i := 0; i < 10; i++ {
+		acc, _ := s.RegisterAccount(fmt.Sprintf("acc%d", i))
+		acc.mu.Lock()
+		accs = append(accs, acc)
+	}
+
+	opts2 := DefaultOptions()
+	opts2.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", opts.Cluster.Host, opts.Cluster.Port))
+	s2 := RunServer(opts2)
+	defer s2.Shutdown()
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		for _, acc := range accs {
+			acc.mu.Unlock()
+		}
+		wg.Done()
+	}()
+
+	nc.QueueSubscribeSync("foo", "bar")
+	nc.Flush()
+
+	wg.Wait()
+}
+
+func TestAccountDuplicateServiceImportSubject(t *testing.T) {
+	opts := DefaultOptions()
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	fooAcc, _ := s.RegisterAccount("foo")
+	fooAcc.AddServiceExport("remote1", nil)
+	fooAcc.AddServiceExport("remote2", nil)
+
+	barAcc, _ := s.RegisterAccount("bar")
+	if err := barAcc.AddServiceImport(fooAcc, "foo", "remote1"); err != nil {
+		t.Fatalf("Error adding service import: %v", err)
+	}
+	if err := barAcc.AddServiceImport(fooAcc, "foo", "remote2"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("Expected an error about duplicate service import subject, got %q", err)
+	}
+}
+
 func BenchmarkNewRouteReply(b *testing.B) {
 	opts := defaultServerOptions
 	s := New(&opts)
-	c, _, _ := newClientForServer(s)
+	g := s.globalAccount()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.newServiceReply()
+		g.newServiceReply(false)
 	}
 }

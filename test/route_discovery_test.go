@@ -634,6 +634,7 @@ func TestImplicitRouteRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error during listen: %v", err)
 	}
+	defer rbListen.Close()
 	c, err := rbListen.Accept()
 	if err != nil {
 		t.Fatalf("Error during accept: %v", err)

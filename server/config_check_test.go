@@ -1113,6 +1113,160 @@ func TestConfigCheck(t *testing.T) {
 			errorLine: 0,
 			errorPos:  0,
 		},
+		{
+			name: "when setting latency tracking without a system account",
+			config: `
+                accounts {
+                  sys { users = [ {user: sys, pass: "" } ] }
+
+                  nats.io: {
+                    users = [ { user : bar, pass: "" } ]
+
+                    exports = [
+                      { service: "nats.add"
+                        response: singleton
+                        latency: {
+                          sampling: 100%
+                          subject: "latency.tracking.add"
+                        }
+                      }
+
+                    ]
+                  }
+                }
+                `,
+			err:       errors.New(`Error adding service latency sampling for "nats.add": system account not setup`),
+			errorLine: 2,
+			errorPos:  17,
+		},
+		{
+			name: "when setting latency tracking with a system account",
+			config: `
+                system_account: sys
+
+                accounts {
+                  sys { users = [ {user: sys, pass: "" } ] }
+
+                  nats.io: {
+                    users = [ { user : bar, pass: "" } ]
+
+                    exports = [
+                      { service: "nats.add"
+                        response: singleton
+                        latency: {
+                          sampling: 100%
+                          subject: "latency.tracking.add"
+                        }
+                      }
+
+                    ]
+                  }
+                }
+                `,
+			err:       nil,
+			errorLine: 0,
+			errorPos:  0,
+		},
+		{
+			name: "when setting latency tracking with an invalid publish subject",
+			config: `
+                system_account = sys
+                accounts {
+                  sys { users = [ {user: sys, pass: "" } ] }
+
+                  nats.io: {
+                    users = [ { user : bar, pass: "" } ]
+
+                    exports = [
+                      { service: "nats.add"
+                        response: singleton
+                        latency: "*"
+                      }
+                    ]
+                  }
+                }
+                `,
+			err:       errors.New(`Error adding service latency sampling for "nats.add" on subject "*": invalid publish subject`),
+			errorLine: 3,
+			errorPos:  17,
+		},
+		{
+			name: "when setting latency tracking on a stream",
+			config: `
+                system_account = sys
+                accounts {
+                  sys { users = [ {user: sys, pass: "" } ] }
+
+                  nats.io: {
+                    users = [ { user : bar, pass: "" } ]
+
+                    exports = [
+                      { stream: "nats.add"
+                        latency: "foo"
+                      }
+                    ]
+                  }
+                }
+                `,
+			err:       errors.New(`Detected latency directive on non-service`),
+			errorLine: 11,
+			errorPos:  25,
+		},
+		{
+			name: "when using duplicate service import subject",
+			config: `
+								accounts {
+									 A: {
+										 users = [ {user: user1, pass: ""} ]
+										 exports = [
+											 {service: "remote1"}
+											 {service: "remote2"}
+										 ]
+									 }
+									 B: {
+										 users = [ {user: user2, pass: ""} ]
+										 imports = [
+											 {service: {account: "A", subject: "remote1"}, to: "local"}
+											 {service: {account: "A", subject: "remote2"}, to: "local"}
+										 ]
+									 }
+								}
+							`,
+			err:       errors.New(`Duplicate service import subject "local", previously used in import for account "A", subject "remote1"`),
+			errorLine: 14,
+			errorPos:  71,
+		},
+		{
+			name: "mixing single and multi users in leafnode authorization",
+			config: `
+                leafnodes {
+                   authorization {
+                     user: user1
+                     password: pwd
+                     users = [{user: user2, password: pwd}]
+									 }
+								}
+              `,
+			err:       errors.New("can not have a single user/pass and a users array"),
+			errorLine: 3,
+			errorPos:  20,
+		},
+		{
+			name: "duplicate usernames in leafnode authorization",
+			config: `
+                leafnodes {
+                   authorization {
+                     users = [
+                       {user: user, password: pwd}
+											 {user: user, password: pwd}
+                     ]
+									 }
+								}
+              `,
+			err:       errors.New(`duplicate user "user" detected in leafnode authorization`),
+			errorLine: 3,
+			errorPos:  20,
+		},
 	}
 
 	checkConfig := func(config string) error {

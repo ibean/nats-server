@@ -32,7 +32,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 )
 
 const CLIENT_PORT = -1
@@ -41,12 +43,13 @@ const CLUSTER_PORT = -1
 
 func DefaultMonitorOptions() *Options {
 	return &Options{
-		Host:     "127.0.0.1",
-		Port:     CLIENT_PORT,
-		HTTPHost: "127.0.0.1",
-		HTTPPort: MONITOR_PORT,
-		NoLog:    true,
-		NoSigs:   true,
+		Host:       "127.0.0.1",
+		Port:       CLIENT_PORT,
+		HTTPHost:   "127.0.0.1",
+		HTTPPort:   MONITOR_PORT,
+		ServerName: "monitor_server",
+		NoLog:      true,
+		NoSigs:     true,
 	}
 }
 
@@ -208,6 +211,9 @@ func TestHandleVarz(t *testing.T) {
 		if v.Subscriptions != 0 {
 			t.Fatalf("Expected Subscriptions of 0, got %v\n", v.Subscriptions)
 		}
+		if v.Name != "monitor_server" {
+			t.Fatal("Expected ServerName to be 'monitor_server'")
+		}
 	}
 
 	// Test JSONP
@@ -322,8 +328,10 @@ func TestConnz(t *testing.T) {
 		if ci.Idle == "" {
 			t.Fatal("Expected Idle to be valid\n")
 		}
-		if ci.RTT != "" {
-			t.Fatal("Expected RTT to NOT be set for new connection\n")
+		// This is a change, we now expect them to be set for connections when the
+		// client sends a connect.
+		if ci.RTT == "" {
+			t.Fatal("Expected RTT to be set for new connection\n")
 		}
 	}
 
@@ -2488,6 +2496,7 @@ func TestMonitorLeafNode(t *testing.T) {
 	opts.LeafNode.Port = -1
 	opts.LeafNode.AuthTimeout = 1
 	opts.LeafNode.TLSTimeout = 1
+	opts.Accounts = []*Account{NewAccount("acc")}
 	u, _ := url.Parse("nats://ivan:pwd@localhost:1234")
 	opts.LeafNode.Remotes = []*RemoteLeafOpts{
 		&RemoteLeafOpts{
@@ -3122,4 +3131,277 @@ func TestMonitorGatewayzAccounts(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestMonitorRouteRTT(t *testing.T) {
+	// Do not change default PingInterval and expect RTT
+	// to still be reported
+
+	ob := DefaultOptions()
+	sb := RunServer(ob)
+	defer sb.Shutdown()
+
+	oa := DefaultOptions()
+	oa.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", ob.Cluster.Host, ob.Cluster.Port))
+	sa := RunServer(oa)
+	defer sa.Shutdown()
+
+	checkClusterFormed(t, sa, sb)
+
+	checkRouteInfo := func(t *testing.T, s *Server) {
+		t.Helper()
+		routezURL := fmt.Sprintf("http://127.0.0.1:%d/routez", s.MonitorAddr().Port)
+		for pollMode := 0; pollMode < 2; pollMode++ {
+			checkFor(t, 2*firstPingInterval, 15*time.Millisecond, func() error {
+				rz := pollRoutez(t, s, pollMode, routezURL, nil)
+				if len(rz.Routes) != 1 {
+					return fmt.Errorf("Expected 1 route, got %v", len(rz.Routes))
+				}
+				ri := rz.Routes[0]
+				if ri.RTT == _EMPTY_ {
+					return fmt.Errorf("Route's RTT not reported")
+				}
+				return nil
+			})
+		}
+	}
+	checkRouteInfo(t, sa)
+	checkRouteInfo(t, sb)
+}
+
+func pollLeafz(t *testing.T, s *Server, mode int, url string, opts *LeafzOptions) *Leafz {
+	t.Helper()
+	if mode == 0 {
+		l := &Leafz{}
+		body := readBody(t, url)
+		if err := json.Unmarshal(body, l); err != nil {
+			t.Fatalf("Got an error unmarshalling the body: %v\n", err)
+		}
+		return l
+	}
+	l, err := s.Leafz(opts)
+	if err != nil {
+		t.Fatalf("Error on Leafz: %v", err)
+	}
+	return l
+}
+
+func TestMonitorLeafz(t *testing.T) {
+	content := `
+	listen: "127.0.0.1:-1"
+	http: "127.0.0.1:-1"
+	operator = "../test/configs/nkeys/op.jwt"
+	resolver = MEMORY
+	ping_interval = 1
+	leafnodes {
+		listen: "127.0.0.1:-1"
+	}
+	`
+	conf := createConfFile(t, []byte(content))
+	defer os.Remove(conf)
+	sb, ob := RunServerWithConfig(conf)
+	defer sb.Shutdown()
+
+	createAcc := func(t *testing.T) (*Account, string) {
+		t.Helper()
+		acc, akp := createAccount(sb)
+		kp, _ := nkeys.CreateUser()
+		pub, _ := kp.PublicKey()
+		nuc := jwt.NewUserClaims(pub)
+		ujwt, err := nuc.Encode(akp)
+		if err != nil {
+			t.Fatalf("Error generating user JWT: %v", err)
+		}
+		seed, _ := kp.Seed()
+		creds := genCredsFile(t, ujwt, seed)
+		return acc, creds
+	}
+	acc1, mycreds1 := createAcc(t)
+	defer os.Remove(mycreds1)
+	acc2, mycreds2 := createAcc(t)
+	defer os.Remove(mycreds2)
+
+	content = `
+		port: -1
+		http: "127.0.0.1:-1"
+		ping_interval = 1
+		accounts {
+			%s {
+				users [
+					{user: user1, password: pwd}
+				]
+			}
+			%s {
+				users [
+					{user: user2, password: pwd}
+				]
+			}
+		}
+		leafnodes {
+			remotes = [
+				{
+					account: "%s"
+					url: nats-leaf://127.0.0.1:%d
+					credentials: "%s"
+				}
+				{
+					account: "%s"
+					url: nats-leaf://127.0.0.1:%d
+					credentials: "%s"
+				}
+			]
+		}
+		`
+	config := fmt.Sprintf(content,
+		acc1.Name, acc2.Name,
+		acc1.Name, ob.LeafNode.Port, mycreds1,
+		acc2.Name, ob.LeafNode.Port, mycreds2)
+	conf = createConfFile(t, []byte(config))
+	defer os.Remove(conf)
+	sa, oa := RunServerWithConfig(conf)
+	defer sa.Shutdown()
+
+	checkFor(t, time.Second, 15*time.Millisecond, func() error {
+		if n := sa.NumLeafNodes(); n != 2 {
+			return fmt.Errorf("Expected 2 leaf connections, got %v", n)
+		}
+		return nil
+	})
+
+	// Wait for initial RTT to be computed
+	time.Sleep(firstPingInterval + 500*time.Millisecond)
+
+	ch := make(chan bool, 1)
+	nc1B := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", ob.Port), nats.UserCredentials(mycreds1))
+	defer nc1B.Close()
+	natsSub(t, nc1B, "foo", func(_ *nats.Msg) { ch <- true })
+	natsSub(t, nc1B, "bar", func(_ *nats.Msg) {})
+	natsFlush(t, nc1B)
+
+	nc2B := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", ob.Port), nats.UserCredentials(mycreds2))
+	defer nc2B.Close()
+	natsSub(t, nc2B, "bar", func(_ *nats.Msg) { ch <- true })
+	natsSub(t, nc2B, "foo", func(_ *nats.Msg) {})
+	natsFlush(t, nc2B)
+
+	nc1A := natsConnect(t, fmt.Sprintf("nats://user1:pwd@127.0.0.1:%d", oa.Port))
+	defer nc1A.Close()
+	natsPub(t, nc1A, "foo", []byte("hello"))
+	natsFlush(t, nc1A)
+
+	waitCh(t, ch, "Did not get the message")
+
+	nc2A := natsConnect(t, fmt.Sprintf("nats://user2:pwd@127.0.0.1:%d", oa.Port))
+	defer nc2A.Close()
+	natsPub(t, nc2A, "bar", []byte("hello"))
+	natsPub(t, nc2A, "bar", []byte("hello"))
+	natsFlush(t, nc2A)
+
+	waitCh(t, ch, "Did not get the message")
+	waitCh(t, ch, "Did not get the message")
+
+	// Let's poll server A
+	pollURL := fmt.Sprintf("http://127.0.0.1:%d/leafz?subs=1", sa.MonitorAddr().Port)
+	for pollMode := 1; pollMode < 2; pollMode++ {
+		l := pollLeafz(t, sa, pollMode, pollURL, &LeafzOptions{Subscriptions: true})
+		if l.ID != sa.ID() {
+			t.Fatalf("Expected ID to be %q, got %q", sa.ID(), l.ID)
+		}
+		if l.Now.IsZero() {
+			t.Fatalf("Expected Now to be set, was not")
+		}
+		if l.NumLeafs != 2 {
+			t.Fatalf("Expected NumLeafs to be 2, got %v", l.NumLeafs)
+		}
+		if len(l.Leafs) != 2 {
+			t.Fatalf("Expected array to be len 2, got %v", len(l.Leafs))
+		}
+		for _, ln := range l.Leafs {
+			if ln.Account == acc1.Name {
+				if ln.OutMsgs != 1 || ln.OutBytes == 0 || ln.InMsgs != 0 || ln.InBytes != 0 {
+					t.Fatalf("Expected 1 OutMsgs/Bytes and 0 InMsgs/Bytes, got %+v", ln)
+				}
+			} else if ln.Account == acc2.Name {
+				if ln.OutMsgs != 2 || ln.OutBytes == 0 || ln.InMsgs != 0 || ln.InBytes != 0 {
+					t.Fatalf("Expected 2 OutMsgs/Bytes and 0 InMsgs/Bytes, got %+v", ln)
+				}
+			} else {
+				t.Fatalf("Expected account to be %q or %q, got %q", acc1.Name, acc2.Name, ln.Account)
+			}
+			if ln.RTT == "" {
+				t.Fatalf("RTT not tracked?")
+			}
+			if ln.NumSubs != 3 {
+				t.Fatalf("Expected 3 subs, got %v", ln.NumSubs)
+			}
+			if len(ln.Subs) != 3 {
+				t.Fatalf("Expected subs to be returned, got %v", len(ln.Subs))
+			}
+			var foundFoo bool
+			var foundBar bool
+			for _, sub := range ln.Subs {
+				if sub == "foo" {
+					foundFoo = true
+				} else if sub == "bar" {
+					foundBar = true
+				}
+			}
+			if !foundFoo {
+				t.Fatal("Did not find subject foo")
+			}
+			if !foundBar {
+				t.Fatal("Did not find subject bar")
+			}
+		}
+	}
+	// Make sure that if we don't ask for subs, we don't get them
+	pollURL = fmt.Sprintf("http://127.0.0.1:%d/leafz", sa.MonitorAddr().Port)
+	for pollMode := 1; pollMode < 2; pollMode++ {
+		l := pollLeafz(t, sa, pollMode, pollURL, nil)
+		for _, ln := range l.Leafs {
+			if ln.NumSubs != 3 {
+				t.Fatalf("Number of subs should be 3, got %v", ln.NumSubs)
+			}
+			if len(ln.Subs) != 0 {
+				t.Fatalf("Subs should not have been returned, got %v", ln.Subs)
+			}
+		}
+	}
+
+	// Now polling server B.
+	pollURL = fmt.Sprintf("http://127.0.0.1:%d/leafz?subs=1", sb.MonitorAddr().Port)
+	for pollMode := 1; pollMode < 2; pollMode++ {
+		l := pollLeafz(t, sb, pollMode, pollURL, &LeafzOptions{Subscriptions: true})
+		if l.ID != sb.ID() {
+			t.Fatalf("Expected ID to be %q, got %q", sb.ID(), l.ID)
+		}
+		if l.Now.IsZero() {
+			t.Fatalf("Expected Now to be set, was not")
+		}
+		if l.NumLeafs != 2 {
+			t.Fatalf("Expected NumLeafs to be 1, got %v", l.NumLeafs)
+		}
+		if len(l.Leafs) != 2 {
+			t.Fatalf("Expected array to be len 2, got %v", len(l.Leafs))
+		}
+		for _, ln := range l.Leafs {
+			if ln.Account == acc1.Name {
+				if ln.OutMsgs != 0 || ln.OutBytes != 0 || ln.InMsgs != 1 || ln.InBytes == 0 {
+					t.Fatalf("Expected 1 InMsgs/Bytes and 0 OutMsgs/Bytes, got %+v", ln)
+				}
+			} else if ln.Account == acc2.Name {
+				if ln.OutMsgs != 0 || ln.OutBytes != 0 || ln.InMsgs != 2 || ln.InBytes == 0 {
+					t.Fatalf("Expected 2 InMsgs/Bytes and 0 OutMsgs/Bytes, got %+v", ln)
+				}
+			} else {
+				t.Fatalf("Expected account to be %q or %q, got %q", acc1.Name, acc2.Name, ln.Account)
+			}
+			if ln.RTT == "" {
+				t.Fatalf("RTT not tracked?")
+			}
+			if ln.NumSubs != 0 || len(ln.Subs) != 0 {
+				t.Fatalf("Did not expect sub, got %v (%v)", ln.NumSubs, ln.Subs)
+			}
+		}
+	}
 }

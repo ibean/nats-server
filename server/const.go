@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.0.3"
+	VERSION = "2.1.2"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -134,7 +134,7 @@ const (
 	DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS = 100000
 
 	// DEFAULT_MAX_ACCOUNT_INTERNAL_RESPONSE_MAPS is for non auto-expire response maps for imports.
-	// These are present for non-singelton response types.
+	// These are present for non-singleton response types.
 	DEFAULT_MAX_ACCOUNT_INTERNAL_RESPONSE_MAPS = 100000
 
 	// DEFAULT_TTL_AE_RESPONSE_MAP is the default time to expire auto-response map entries.
@@ -175,4 +175,8 @@ const (
 	// DEFAULT_ALLOW_RESPONSE_EXPIRATION is the default time allowed for a given
 	// dynamic response permission.
 	DEFAULT_ALLOW_RESPONSE_EXPIRATION = 2 * time.Minute
+
+	// DEFAULT_SERVICE_LATENCY_SAMPLING is the default sampling rate for service
+	// latency metrics
+	DEFAULT_SERVICE_LATENCY_SAMPLING = 100
 )

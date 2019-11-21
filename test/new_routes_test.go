@@ -18,9 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
-	"runtime"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -243,7 +240,8 @@ func TestNewRouteRSubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not marshal test route info: %v", err)
 	}
-	routeSend(fmt.Sprintf("INFO %s\r\nPING\r\n", b))
+	routeSend(fmt.Sprintf("INFO %s\r\n", b))
+	routeSend("PING\r\n")
 	routeExpect(pongRe)
 
 	// Have the client listen on foo.
@@ -418,7 +416,6 @@ func TestNewRouteClientClosedWithNormalSubscriptions(t *testing.T) {
 		t.Fatalf("Could not marshal test route info: %v", err)
 	}
 	routeSend(fmt.Sprintf("INFO %s\r\n", b))
-
 	routeSend("PING\r\n")
 	routeExpect(pongRe)
 
@@ -468,7 +465,6 @@ func TestNewRouteClientClosedWithQueueSubscriptions(t *testing.T) {
 		t.Fatalf("Could not marshal test route info: %v", err)
 	}
 	routeSend(fmt.Sprintf("INFO %s\r\n", b))
-
 	routeSend("PING\r\n")
 	routeExpect(pongRe)
 
@@ -609,7 +605,8 @@ func TestNewRouteSendSubsAndMsgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not marshal test route info: %v", err)
 	}
-	routeSend(fmt.Sprintf("INFO %s\r\nPING\r\n", b))
+	routeSend(fmt.Sprintf("INFO %s\r\n", b))
+	routeSend("PING\r\n")
 	routeExpect(pongRe)
 
 	// Now let's send in interest from the new protocol.
@@ -736,7 +733,8 @@ func TestNewRouteProcessRoutedMsgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not marshal test route info: %v", err)
 	}
-	routeSend(fmt.Sprintf("INFO %s\r\nPING\r\n", b))
+	routeSend(fmt.Sprintf("INFO %s\r\n", b))
+	routeSend("PING\r\n")
 	routeExpect(pongRe)
 
 	// Create a client
@@ -1172,7 +1170,7 @@ func TestNewRouteReservedReply(t *testing.T) {
 
 func TestNewRouteServiceImport(t *testing.T) {
 	// To quickly enable trace and debug logging
-	// doLog, doTrace, doDebug = true, true, true
+	//doLog, doTrace, doDebug = true, true, true
 	srvA, srvB, optsA, optsB := runServers(t)
 	defer srvA.Shutdown()
 	defer srvB.Shutdown()
@@ -1239,8 +1237,9 @@ func TestNewRouteServiceImport(t *testing.T) {
 	matches = expectMsgsB(1)
 	checkMsg(t, matches[0], "reply", "1", "", "2", "ok")
 
-	if ts := fooA.TotalSubs(); ts != 1 {
-		t.Fatalf("Expected one sub to be left on fooA, but got %d", ts)
+	// This will be the responder and the wildcard for all service replies.
+	if ts := fooA.TotalSubs(); ts != 2 {
+		t.Fatalf("Expected two subs to be left on fooA, but got %d", ts)
 	}
 
 	routez, _ := srvA.Routez(&server.RoutezOptions{Subscriptions: true})
@@ -1248,8 +1247,8 @@ func TestNewRouteServiceImport(t *testing.T) {
 	if r == nil {
 		t.Fatalf("Expected 1 route, got none")
 	}
-	if r.NumSubs != 1 {
-		t.Fatalf("Expected 1 sub in the route connection, got %v", r.NumSubs)
+	if r.NumSubs != 2 {
+		t.Fatalf("Expected 2 subs in the route connection, got %v", r.NumSubs)
 	}
 }
 
@@ -1334,8 +1333,8 @@ func TestNewRouteServiceExportWithWildcards(t *testing.T) {
 			matches = expectMsgsB(1)
 			checkMsg(t, matches[0], "reply", "1", "", "2", "ok")
 
-			if ts := fooA.TotalSubs(); ts != 1 {
-				t.Fatalf("Expected one sub to be left on fooA, but got %d", ts)
+			if ts := fooA.TotalSubs(); ts != 2 {
+				t.Fatalf("Expected two subs to be left on fooA, but got %d", ts)
 			}
 
 			routez, _ := srvA.Routez(&server.RoutezOptions{Subscriptions: true})
@@ -1343,8 +1342,8 @@ func TestNewRouteServiceExportWithWildcards(t *testing.T) {
 			if r == nil {
 				t.Fatalf("Expected 1 route, got none")
 			}
-			if r.NumSubs != 1 {
-				t.Fatalf("Expected 1 sub in the route connection, got %v", r.NumSubs)
+			if r.NumSubs != 2 {
+				t.Fatalf("Expected 2 subs in the route connection, got %v", r.NumSubs)
 			}
 		})
 	}
@@ -1409,8 +1408,8 @@ func TestNewRouteServiceImportQueueGroups(t *testing.T) {
 	matches = expectMsgsB(1)
 	checkMsg(t, matches[0], "reply", "1", "", "2", "ok")
 
-	if ts := fooA.TotalSubs(); ts != 1 {
-		t.Fatalf("Expected one sub to be left on fooA, but got %d", ts)
+	if ts := fooA.TotalSubs(); ts != 2 {
+		t.Fatalf("Expected two subs to be left on fooA, but got %d", ts)
 	}
 
 	routez, _ := srvA.Routez(&server.RoutezOptions{Subscriptions: true})
@@ -1418,8 +1417,8 @@ func TestNewRouteServiceImportQueueGroups(t *testing.T) {
 	if r == nil {
 		t.Fatalf("Expected 1 route, got none")
 	}
-	if r.NumSubs != 1 {
-		t.Fatalf("Expected 1 sub in the route connection, got %v", r.NumSubs)
+	if r.NumSubs != 2 {
+		t.Fatalf("Expected 2 subs in the route connection, got %v", r.NumSubs)
 	}
 }
 
@@ -1492,8 +1491,8 @@ func TestNewRouteServiceImportDanglingRemoteSubs(t *testing.T) {
 	expectA(pongRe)
 
 	checkFor(t, time.Second, 10*time.Millisecond, func() error {
-		if ts := fooA.TotalSubs(); ts != 0 {
-			return fmt.Errorf("Number of subs is %d, should be zero", ts)
+		if ts := fooA.TotalSubs(); ts != 1 {
+			return fmt.Errorf("Number of subs is %d, should be only 1", ts)
 		}
 		return nil
 	})
@@ -1603,57 +1602,6 @@ func TestNewRouteLargeDistinctQueueSubscribers(t *testing.T) {
 		}
 		return nil
 	})
-}
-
-func TestLargeClusterMem(t *testing.T) {
-	// Try to clean up.
-	runtime.GC()
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	pta := m.TotalAlloc
-
-	opts := func() *server.Options {
-		o := DefaultTestOptions
-		o.Host = "127.0.0.1"
-		o.Port = -1
-		o.Cluster.Host = o.Host
-		o.Cluster.Port = -1
-		return &o
-	}
-
-	var servers []*server.Server
-
-	// Create seed first.
-	o := opts()
-	s := RunServer(o)
-	servers = append(servers, s)
-
-	// For connecting to seed server above.
-	routeAddr := fmt.Sprintf("nats-route://%s:%d", o.Cluster.Host, o.Cluster.Port)
-	rurl, _ := url.Parse(routeAddr)
-	routes := []*url.URL{rurl}
-
-	numServers := 15
-
-	for i := 1; i < numServers; i++ {
-		o := opts()
-		o.Routes = routes
-		s := RunServer(o)
-		servers = append(servers, s)
-	}
-	checkClusterFormed(t, servers...)
-
-	// Calculate in MB what we are using now.
-	const max = 50 * 1024 * 1024 // 50MB
-	runtime.ReadMemStats(&m)
-	used := m.TotalAlloc - pta
-	if used > max {
-		t.Fatalf("Cluster using too much memory, expect < 50MB, got %dMB", used/(1024*1024))
-	}
-
-	for _, s := range servers {
-		s.Shutdown()
-	}
 }
 
 func TestClusterLeaksSubscriptions(t *testing.T) {
@@ -1775,77 +1723,4 @@ func TestClusterLeaksSubscriptions(t *testing.T) {
 		}
 		return nil
 	})
-}
-
-// Make sure we have the correct remote state when dealing with queue subscribers
-// across many client connections.
-func TestQueueSubWeightOrderMultipleConnections(t *testing.T) {
-	s, opts := runNewRouteServer(t)
-	defer s.Shutdown()
-
-	// Create 100 connections to s
-	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
-	clients := make([]*nats.Conn, 0, 100)
-	for i := 0; i < 100; i++ {
-		nc, err := nats.Connect(url, nats.NoReconnect())
-		if err != nil {
-			t.Fatalf("Error connecting: %v", err)
-		}
-		defer nc.Close()
-		clients = append(clients, nc)
-	}
-
-	rc := createRouteConn(t, opts.Cluster.Host, opts.Cluster.Port)
-	defer rc.Close()
-
-	routeID := "RTEST_NEW:22"
-	routeSend, routeExpect := setupRouteEx(t, rc, opts, routeID)
-
-	info := checkInfoMsg(t, rc)
-
-	info.ID = routeID
-	b, err := json.Marshal(info)
-	if err != nil {
-		t.Fatalf("Could not marshal test route info: %v", err)
-	}
-	routeSend(fmt.Sprintf("INFO %s\r\n", b))
-
-	start := make(chan bool)
-	for _, nc := range clients {
-		go func(nc *nats.Conn) {
-			<-start
-			// Now create 100 identical queue subscribers on each connection.
-			for i := 0; i < 100; i++ {
-				if _, err := nc.QueueSubscribeSync("foo", "bar"); err != nil {
-					return
-				}
-			}
-			nc.Flush()
-		}(nc)
-	}
-	close(start)
-
-	// We did have this where we wanted to get every update, but now with optimizations
-	// we just want to make sure we always are increasing and that a previous update to
-	// a lesser queue weight is never delivered for this test.
-	max_expected := 10000
-	for qw := 0; qw < max_expected; {
-		buf := routeExpect(rsubRe)
-		matches := rsubRe.FindAllSubmatch(buf, -1)
-		for _, m := range matches {
-			if len(m) != 5 {
-				t.Fatalf("Expected a weight for the queue group")
-			}
-			nqw, err := strconv.Atoi(string(m[4]))
-			if err != nil {
-				t.Fatalf("Got an error converting queue weight: %v", err)
-			}
-			// Make sure the new value only increases, ok to skip since we will
-			// optimize this now, but needs to always be increasing.
-			if nqw <= qw {
-				t.Fatalf("Was expecting increasing queue weight after %d, got %d", qw, nqw)
-			}
-			qw = nqw
-		}
-	}
 }

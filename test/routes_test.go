@@ -62,7 +62,8 @@ func TestSendRouteInfoOnConnect(t *testing.T) {
 	rc := createRouteConn(t, opts.Cluster.Host, opts.Cluster.Port)
 	defer rc.Close()
 
-	routeSend, routeExpect := setupRoute(t, rc, opts)
+	routeID := "RouteID"
+	routeSend, routeExpect := setupRouteEx(t, rc, opts, routeID)
 	buf := routeExpect(infoRe)
 
 	info := server.Info{}
@@ -80,7 +81,7 @@ func TestSendRouteInfoOnConnect(t *testing.T) {
 
 	// Need to send a different INFO than the one received, otherwise the server
 	// will detect as a "cycle" and close the connection.
-	info.ID = "RouteID"
+	info.ID = routeID
 	b, err := json.Marshal(info)
 	if err != nil {
 		t.Fatalf("Could not marshal test route info: %v", err)

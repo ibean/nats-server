@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,7 @@ func TestOptions_RandomPort(t *testing.T) {
 func TestConfigFile(t *testing.T) {
 	golden := &Options{
 		ConfigFile:            "./configs/test.conf",
+		ServerName:            "testing_server",
 		Host:                  "127.0.0.1",
 		Port:                  4242,
 		Username:              "derek",
@@ -238,6 +240,7 @@ func TestTLSConfigFile(t *testing.T) {
 func TestMergeOverrides(t *testing.T) {
 	golden := &Options{
 		ConfigFile:     "./configs/test.conf",
+		ServerName:     "testing_server",
 		Host:           "127.0.0.1",
 		Port:           2222,
 		Username:       "derek",
@@ -797,8 +800,8 @@ func TestNewStyleAuthorizationConfig(t *testing.T) {
 			len(alice.Permissions.Subscribe.Deny))
 	}
 	subPerm := alice.Permissions.Subscribe.Deny[0]
-	if subPerm != "$SYSTEM.>" {
-		t.Fatalf("Expected Alice's only denied subscribe permission to be '$SYSTEM.>', got %q", subPerm)
+	if subPerm != "$SYS.>" {
+		t.Fatalf("Expected Alice's only denied subscribe permission to be '$SYS.>', got %q", subPerm)
 	}
 
 	// Bob
@@ -818,8 +821,8 @@ func TestNewStyleAuthorizationConfig(t *testing.T) {
 			len(bob.Permissions.Publish.Allow))
 	}
 	pubPerm = bob.Permissions.Publish.Allow[0]
-	if pubPerm != "$SYSTEM.>" {
-		t.Fatalf("Expected Bob's first allowed publish permission to be '$SYSTEM.>', got %q", pubPerm)
+	if pubPerm != "$SYS.>" {
+		t.Fatalf("Expected Bob's first allowed publish permission to be '$SYS.>', got %q", pubPerm)
 	}
 	if len(bob.Permissions.Publish.Deny) != 0 {
 		t.Fatalf("Expected Bob's denied publish permissions to have 0 elements, got %d",
@@ -877,7 +880,7 @@ func TestNkeyUsersWithPermsConfig(t *testing.T) {
       users = [
         {nkey: "UDKTV7HZVYJFJN64LLMYQBUR6MTNNYCDC3LAZH4VHURW3GZLL3FULBXV",
          permissions = {
-           publish = "$SYSTEM.>"
+           publish = "$SYS.>"
            subscribe = { deny = ["foo", "bar", "baz"] }
          }
         }
@@ -899,8 +902,8 @@ func TestNkeyUsersWithPermsConfig(t *testing.T) {
 	if nk.Permissions.Publish == nil {
 		t.Fatal("Expected to have publish permissions")
 	}
-	if nk.Permissions.Publish.Allow[0] != "$SYSTEM.>" {
-		t.Fatalf("Expected publish to allow \"$SYSTEM.>\", but got %v", nk.Permissions.Publish.Allow[0])
+	if nk.Permissions.Publish.Allow[0] != "$SYS.>" {
+		t.Fatalf("Expected publish to allow \"$SYS.>\", but got %v", nk.Permissions.Publish.Allow[0])
 	}
 	if nk.Permissions.Subscribe == nil {
 		t.Fatal("Expected to have subscribe permissions")
@@ -1321,7 +1324,7 @@ func TestConfigureOptions(t *testing.T) {
 	// that Visit() stops when an error is found).
 	expectToFail([]string{"-cluster", ":", "-routes", ""}, "protocol")
 	expectToFail([]string{"-cluster", "nats://127.0.0.1", "-routes", ""}, "port")
-	expectToFail([]string{"-cluster", "nats://127.0.0.1:xxx", "-routes", ""}, "integer")
+	expectToFail([]string{"-cluster", "nats://127.0.0.1:xxx", "-routes", ""}, "invalid port")
 	expectToFail([]string{"-cluster", "nats://ivan:127.0.0.1:6222", "-routes", ""}, "colons")
 	expectToFail([]string{"-cluster", "nats://ivan@127.0.0.1:6222", "-routes", ""}, "password")
 
@@ -1511,6 +1514,139 @@ func TestClusterPermissionsConfig(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Expected failure for permissions %s", perms)
 		}
+	}
+}
+
+func TestParseServiceLatency(t *testing.T) {
+	cases := []struct {
+		name    string
+		conf    string
+		want    *serviceLatency
+		wantErr bool
+	}{
+		{
+			name: "block with percent sample default value",
+			conf: `system_account = nats.io
+			accounts {
+				nats.io {
+					exports [{
+						service: nats.add
+						latency: {
+							sampling: 100%
+							subject: latency.tracking.add
+						}
+					}]
+				}
+			}`,
+			want: &serviceLatency{
+				subject:  "latency.tracking.add",
+				sampling: 100,
+			},
+		},
+		{
+			name: "block with percent sample nondefault value",
+			conf: `system_account = nats.io
+			accounts {
+				nats.io {
+					exports [{
+						service: nats.add
+						latency: {
+							sampling: 33%
+							subject: latency.tracking.add
+						}
+					}]
+				}
+			}`,
+			want: &serviceLatency{
+				subject:  "latency.tracking.add",
+				sampling: 33,
+			},
+		},
+		{
+			name: "block with number sample nondefault value",
+			conf: `system_account = nats.io
+			accounts {
+				nats.io {
+					exports [{
+						service: nats.add
+						latency: {
+							sampling: 87
+							subject: latency.tracking.add
+						}
+					}]
+				}
+			}`,
+			want: &serviceLatency{
+				subject:  "latency.tracking.add",
+				sampling: 87,
+			},
+		},
+		{
+			name: "field with subject",
+			conf: `system_account = nats.io
+			accounts {
+				nats.io {
+					exports [{
+						service: nats.add
+						latency: latency.tracking.add
+					}]
+				}
+			}`,
+			want: &serviceLatency{
+				subject:  "latency.tracking.add",
+				sampling: 100,
+			},
+		},
+		{
+			name: "block with missing subject",
+			conf: `system_account = nats.io
+			accounts {
+				nats.io {
+					exports [{
+						service: nats.add
+						latency: {
+							sampling: 87
+						}
+					}]
+				}
+			}`,
+			wantErr: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := createConfFile(t, []byte(c.conf))
+			opts, err := ProcessConfigFile(f)
+			os.Remove(f)
+			switch {
+			case c.wantErr && err == nil:
+				t.Fatalf("Expected ProcessConfigFile to fail, but didn't")
+			case c.wantErr && err != nil:
+				// We wanted an error and got one, test passed.
+				return
+			case !c.wantErr && err == nil:
+				// We didn't want an error and didn't get one, keep going.
+				break
+			case !c.wantErr && err != nil:
+				t.Fatalf("Failed to process config: %v", err)
+			}
+
+			if len(opts.Accounts) != 1 {
+				t.Fatalf("Expected accounts to have len %d, got %d", 1, len(opts.Accounts))
+			}
+			if len(opts.Accounts[0].exports.services) != 1 {
+				t.Fatalf("Expected export services to have len %d, got %d", 1, len(opts.Accounts[0].exports.services))
+			}
+			s, ok := opts.Accounts[0].exports.services["nats.add"]
+			if !ok {
+				t.Fatalf("Expected export service nats.add, missing")
+			}
+
+			if !reflect.DeepEqual(s.latency, c.want) {
+				t.Fatalf("Expected latency to be %#v, got %#v", c.want, s.latency)
+			}
+		})
 	}
 }
 
@@ -1894,7 +2030,8 @@ func TestParsingLeafNodesListener(t *testing.T) {
 }
 
 func TestParsingLeafNodeRemotes(t *testing.T) {
-	content := `
+	t.Run("parse config file with relative path", func(t *testing.T) {
+		content := `
 		leafnodes {
 			remotes = [
 				{
@@ -1905,24 +2042,62 @@ func TestParsingLeafNodeRemotes(t *testing.T) {
 			]
 		}
 		`
-	conf := createConfFile(t, []byte(content))
-	defer os.Remove(conf)
-	opts, err := ProcessConfigFile(conf)
-	if err != nil {
-		t.Fatalf("Error processing file: %v", err)
-	}
-	if len(opts.LeafNode.Remotes) != 1 {
-		t.Fatalf("Expected 1 remote, got %d", len(opts.LeafNode.Remotes))
-	}
-	expected := &RemoteLeafOpts{
-		LocalAccount: "foobar",
-		Credentials:  "./my.creds",
-	}
-	u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
-	expected.URLs = append(expected.URLs, u)
-	if !reflect.DeepEqual(opts.LeafNode.Remotes[0], expected) {
-		t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes[0])
-	}
+		conf := createConfFile(t, []byte(content))
+		defer os.Remove(conf)
+		opts, err := ProcessConfigFile(conf)
+		if err != nil {
+			t.Fatalf("Error processing file: %v", err)
+		}
+		if len(opts.LeafNode.Remotes) != 1 {
+			t.Fatalf("Expected 1 remote, got %d", len(opts.LeafNode.Remotes))
+		}
+		expected := &RemoteLeafOpts{
+			LocalAccount: "foobar",
+			Credentials:  "./my.creds",
+		}
+		u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
+		expected.URLs = append(expected.URLs, u)
+		if !reflect.DeepEqual(opts.LeafNode.Remotes[0], expected) {
+			t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes[0])
+		}
+	})
+
+	t.Run("parse config file with tilde path", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.SkipNow()
+		}
+
+		origHome := os.Getenv("HOME")
+		defer os.Setenv("HOME", origHome)
+		os.Setenv("HOME", "/home/foo")
+
+		content := `
+		leafnodes {
+			remotes = [
+				{
+					url: nats-leaf://127.0.0.1:2222
+					account: foobar // Local Account to bind to..
+					credentials: "~/my.creds"
+				}
+			]
+		}
+		`
+		conf := createConfFile(t, []byte(content))
+		defer os.Remove(conf)
+		opts, err := ProcessConfigFile(conf)
+		if err != nil {
+			t.Fatalf("Error processing file: %v", err)
+		}
+		expected := &RemoteLeafOpts{
+			LocalAccount: "foobar",
+			Credentials:  "/home/foo/my.creds",
+		}
+		u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
+		expected.URLs = append(expected.URLs, u)
+		if !reflect.DeepEqual(opts.LeafNode.Remotes[0], expected) {
+			t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes[0])
+		}
+	})
 }
 
 func TestLargeMaxControlLine(t *testing.T) {
@@ -2043,4 +2218,197 @@ func TestSublistNoCacheConfigOnAccounts(t *testing.T) {
 		}
 		return true
 	})
+}
+
+func TestParsingResponsePermissions(t *testing.T) {
+	template := `
+		listen: "127.0.0.1:-1"
+		authorization {
+			users [
+				{
+					user: ivan
+					password: pwd
+					permissions {
+						allow_responses {
+							%s
+							%s
+						}
+					}
+				}
+			]
+		}
+	`
+
+	check := func(t *testing.T, conf string, expectedError string, expectedMaxMsgs int, expectedTTL time.Duration) {
+		t.Helper()
+		opts, err := ProcessConfigFile(conf)
+		if expectedError != "" {
+			if err == nil || !strings.Contains(err.Error(), expectedError) {
+				t.Fatalf("Expected error about %q, got %q", expectedError, err)
+			}
+			// OK!
+			return
+		}
+		if err != nil {
+			t.Fatalf("Error on process: %v", err)
+		}
+		u := opts.Users[0]
+		p := u.Permissions.Response
+		if p == nil {
+			t.Fatalf("Expected response permissions to be set, it was not")
+		}
+		if n := p.MaxMsgs; n != expectedMaxMsgs {
+			t.Fatalf("Expected response max msgs to be %v, got %v", expectedMaxMsgs, n)
+		}
+		if ttl := p.Expires; ttl != expectedTTL {
+			t.Fatalf("Expected response ttl to be %v, got %v", expectedTTL, ttl)
+		}
+	}
+
+	// Check defaults
+	conf := createConfFile(t, []byte(fmt.Sprintf(template, "", "")))
+	defer os.Remove(conf)
+	check(t, conf, "", DEFAULT_ALLOW_RESPONSE_MAX_MSGS, DEFAULT_ALLOW_RESPONSE_EXPIRATION)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 10", "")))
+	defer os.Remove(conf)
+	check(t, conf, "", 10, DEFAULT_ALLOW_RESPONSE_EXPIRATION)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "", "ttl: 5s")))
+	defer os.Remove(conf)
+	check(t, conf, "", DEFAULT_ALLOW_RESPONSE_MAX_MSGS, 5*time.Second)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 0", "")))
+	defer os.Remove(conf)
+	check(t, conf, "", DEFAULT_ALLOW_RESPONSE_MAX_MSGS, DEFAULT_ALLOW_RESPONSE_EXPIRATION)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "", `ttl: "0s"`)))
+	defer os.Remove(conf)
+	check(t, conf, "", DEFAULT_ALLOW_RESPONSE_MAX_MSGS, DEFAULT_ALLOW_RESPONSE_EXPIRATION)
+
+	// Check normal values
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 10", `ttl: "5s"`)))
+	defer os.Remove(conf)
+	check(t, conf, "", 10, 5*time.Second)
+
+	// Check negative values ok
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: -1", `ttl: "5s"`)))
+	defer os.Remove(conf)
+	check(t, conf, "", -1, 5*time.Second)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 10", `ttl: "-1s"`)))
+	defer os.Remove(conf)
+	check(t, conf, "", 10, -1*time.Second)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: -1", `ttl: "-1s"`)))
+	defer os.Remove(conf)
+	check(t, conf, "", -1, -1*time.Second)
+
+	// Check parsing errors
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "unknown_field: 123", "")))
+	defer os.Remove(conf)
+	check(t, conf, "Unknown field", 0, 0)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 10", "ttl: 123")))
+	defer os.Remove(conf)
+	check(t, conf, "not a duration string", 0, 0)
+
+	conf = createConfFile(t, []byte(fmt.Sprintf(template, "max: 10", "ttl: xyz")))
+	defer os.Remove(conf)
+	check(t, conf, "error parsing expires", 0, 0)
+}
+
+func TestExpandPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		origUserProfile := os.Getenv("USERPROFILE")
+		origHomeDrive, origHomePath := os.Getenv("HOMEDRIVE"), os.Getenv("HOMEPATH")
+		defer func() {
+			os.Setenv("USERPROFILE", origUserProfile)
+			os.Setenv("HOMEDRIVE", origHomeDrive)
+			os.Setenv("HOMEPATH", origHomePath)
+		}()
+
+		cases := []struct {
+			path        string
+			userProfile string
+			homeDrive   string
+			homePath    string
+
+			wantPath string
+			wantErr  bool
+		}{
+			// Missing HOMEDRIVE and HOMEPATH.
+			{path: "/Foo/Bar", userProfile: `C:\Foo\Bar`, wantPath: "/Foo/Bar"},
+			{path: "Foo/Bar", userProfile: `C:\Foo\Bar`, wantPath: "Foo/Bar"},
+			{path: "~/Fizz", userProfile: `C:\Foo\Bar`, wantPath: `C:\Foo\Bar\Fizz`},
+			{path: `${HOMEDRIVE}${HOMEPATH}\Fizz`, userProfile: `C:\Foo\Bar`, wantPath: `C:\Foo\Bar\Fizz`},
+
+			// Missing USERPROFILE.
+			{path: "~/Fizz", homeDrive: "X:", homePath: `\Foo\Bar`, wantPath: `X:\Foo\Bar\Fizz`},
+
+			// Set all environment variables. HOMEDRIVE and HOMEPATH take
+			// precedence.
+			{path: "~/Fizz", userProfile: `C:\Foo\Bar`,
+				homeDrive: "X:", homePath: `\Foo\Bar`, wantPath: `X:\Foo\Bar\Fizz`},
+
+			// Missing all environment variables.
+			{path: "~/Fizz", wantErr: true},
+		}
+		for i, c := range cases {
+			t.Run(fmt.Sprintf("windows case %d", i), func(t *testing.T) {
+				os.Setenv("USERPROFILE", c.userProfile)
+				os.Setenv("HOMEDRIVE", c.homeDrive)
+				os.Setenv("HOMEPATH", c.homePath)
+
+				gotPath, err := expandPath(c.path)
+				if !c.wantErr && err != nil {
+					t.Fatalf("unexpected error: got=%v; want=%v", err, nil)
+				} else if c.wantErr && err == nil {
+					t.Fatalf("unexpected success: got=%v; want=%v", nil, "err")
+				}
+
+				if gotPath != c.wantPath {
+					t.Fatalf("unexpected path: got=%v; want=%v", gotPath, c.wantPath)
+				}
+			})
+		}
+
+		return
+	}
+
+	// Unix tests
+
+	origHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", origHome)
+
+	cases := []struct {
+		path     string
+		home     string
+		wantPath string
+		wantErr  bool
+	}{
+		{path: "/foo/bar", home: "/fizz/buzz", wantPath: "/foo/bar"},
+		{path: "foo/bar", home: "/fizz/buzz", wantPath: "foo/bar"},
+		{path: "~/fizz", home: "/foo/bar", wantPath: "/foo/bar/fizz"},
+		{path: "$HOME/fizz", home: "/foo/bar", wantPath: "/foo/bar/fizz"},
+
+		// missing HOME env var
+		{path: "~/fizz", wantErr: true},
+	}
+	for i, c := range cases {
+		t.Run(fmt.Sprintf("unix case %d", i), func(t *testing.T) {
+			os.Setenv("HOME", c.home)
+
+			gotPath, err := expandPath(c.path)
+			if !c.wantErr && err != nil {
+				t.Fatalf("unexpected error: got=%v; want=%v", err, nil)
+			} else if c.wantErr && err == nil {
+				t.Fatalf("unexpected success: got=%v; want=%v", nil, "err")
+			}
+
+			if gotPath != c.wantPath {
+				t.Fatalf("unexpected path: got=%v; want=%v", gotPath, c.wantPath)
+			}
+		})
+	}
 }

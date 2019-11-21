@@ -14,7 +14,7 @@
 
 * [Twitter](https://twitter.com/nats_io): Follow us on Twitter!
 * [Google Groups](https://groups.google.com/forum/#!forum/natsio): Where you can ask questions
-* [Slack](https://natsio.slack.com): To join go [here](https://join.slack.com/t/natsio/shared_invite/enQtMzE2NDkxNDI2NTE1LTc5ZDEzYTkwYWZkYWQ5YjY1MzBjMWZmYzA5OGQxMzlkMGQzMjYxNGM3MWYxMjNiYmNjNzIwMTVjMWE2ZDgxZGM). You can ask question to our maintainers and to the rich and active community.
+* [Slack](https://natsio.slack.com): Click [here](https://slack.nats.io) to join. You can ask question to our maintainers and to the rich and active community.
 
 ## Contributing
 
@@ -29,8 +29,8 @@ If you are interested in contributing to NATS, read about our...
 [Fossa-Image]: https://app.fossa.io/api/projects/git%2Bgithub.com%2Fnats-io%2Fgnatsd.svg?type=shield
 [Build-Status-Url]: https://travis-ci.org/nats-io/nats-server
 [Build-Status-Image]: https://travis-ci.org/nats-io/nats-server.svg?branch=master
-[Release-Url]: https://github.com/nats-io/nats-server/releases/tag/v2.0.2
-[Release-image]: https://img.shields.io/badge/release-v2.0.2-1eb0fc.svg
+[Release-Url]: https://github.com/nats-io/nats-server/releases/tag/v2.1.2
+[Release-image]: https://img.shields.io/badge/release-v2.1.2-1eb0fc.svg
 [Coverage-Url]: https://coveralls.io/r/nats-io/nats-server?branch=master
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-server/badge.svg?branch=master
 [ReportCard-Url]: https://goreportcard.com/report/nats-io/nats-server
